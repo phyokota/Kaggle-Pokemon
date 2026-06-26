@@ -61,6 +61,17 @@ ENERGY_TARGET_PRIORITY = {
     MEOWTH: 50,
 }
 
+# Highest attack Energy cost for each Pokemon in this deck.
+MAX_ATTACK_COST = {
+    RIOLU: 1,
+    LUCARIO: 2,
+    LUNATONE: 2,
+    SOLROCK: 1,
+    MAKUHITA: 2,
+    HARIYAMA: 3,
+    MEOWTH: 3,
+}
+
 # How much we want to play each Trainer during the main turn.
 # Situational Trainers start lower and get boosted later when attacking is possible.
 PLAY_TRAINER_PRIORITY = {
@@ -207,6 +218,15 @@ def _target_id_for_option(obs: Observation, option: Option) -> int | None:
     return None if card is None else card.id
 
 
+def _pokemon_has_max_energy(pokemon) -> bool:
+    if pokemon is None or not hasattr(pokemon, "energies"):
+        return False
+    max_cost = MAX_ATTACK_COST.get(pokemon.id)
+    if max_cost is None:
+        return False
+    return len(pokemon.energies) >= max_cost
+
+
 # Check whether a given damage amount would Knock Out the opponent's Active Pokemon.
 def _active_can_be_knocked_out(obs: Observation, damage: int) -> bool:
     opponent = _opponent_state(obs)
@@ -288,6 +308,9 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
         return DISCARD_PRIORITY.get(card_id, 200)
 
     if obs.select.context in {SelectContext.ATTACH_TO, SelectContext.TO_ACTIVE, SelectContext.SWITCH}:
+        target = _card_from_area(obs, option.area, option.index, option.playerIndex)
+        if _pokemon_has_max_energy(target):
+            return -200
         return ENERGY_TARGET_PRIORITY.get(card_id, STARTER_PRIORITY.get(card_id, 0))
 
     return POKEMON_SEARCH_PRIORITY.get(card_id, DISCARD_PRIORITY.get(card_id, 0))
@@ -316,7 +339,10 @@ def _score_main_action(obs: Observation, option: Option) -> int:
 
     if option.type == OptionType.ATTACH:
         card_id = _card_id_for_option(obs, option)
-        target_id = _target_id_for_option(obs, option)
+        target = _card_from_area(obs, option.inPlayArea, option.inPlayIndex, obs.current.yourIndex)
+        target_id = None if target is None else target.id
+        if target is not None and _pokemon_has_max_energy(target):
+            return -200
         if card_id == FIGHTING_ENERGY:
             return 700 + ENERGY_TARGET_PRIORITY.get(target_id, 0)
         return 300 + ENERGY_TARGET_PRIORITY.get(target_id, 0)
