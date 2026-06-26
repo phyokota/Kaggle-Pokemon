@@ -61,6 +61,17 @@ ENERGY_TARGET_PRIORITY = {
     MEOWTH: 50,
 }
 
+# Which Benched Pokemon should become Active after our Active is Knocked Out.
+# Meowth is intentionally very low because we want to keep it out of the Active Spot.
+BENCH_PROMOTION_PRIORITY = {
+    LUCARIO: 900,
+    SOLROCK: 700,
+    HARIYAMA: 600,
+    MAKUHITA: 500,
+    LUNATONE: 400,
+    MEOWTH: -1000,
+}
+
 # Highest attack Energy cost for each Pokemon in this deck.
 MAX_ATTACK_COST = {
     RIOLU: 1,
@@ -219,12 +230,34 @@ def _target_id_for_option(obs: Observation, option: Option) -> int | None:
 
 
 def _pokemon_has_max_energy(pokemon) -> bool:
+    # Stop attaching Energy once a Pokemon can pay for its most expensive attack.
     if pokemon is None or not hasattr(pokemon, "energies"):
         return False
     max_cost = MAX_ATTACK_COST.get(pokemon.id)
     if max_cost is None:
         return False
     return len(pokemon.energies) >= max_cost
+
+
+def _can_find_lucario_next_turn(obs: Observation) -> bool:
+    # Riolu is a better Active candidate when we can evolve it soon.
+    hand = set(_hand_ids(obs))
+    return LUCARIO in hand or ULTRA_BALL in hand
+
+
+def _bench_promotion_score(obs: Observation, card_id: int) -> int:
+    # Apply the KO replacement order, with Riolu boosted only when Lucario is reachable.
+    if card_id == RIOLU:
+        return 800 if _can_find_lucario_next_turn(obs) else 350
+    return BENCH_PROMOTION_PRIORITY.get(card_id, STARTER_PRIORITY.get(card_id, 0))
+
+
+def _hariyama_switch_needed(obs: Observation) -> bool:
+    # Hariyama's evolution Ability matters most when we need to pull up a Bench target.
+    opponent = _opponent_state(obs)
+    if opponent is None or not opponent.bench:
+        return False
+    return not _active_can_be_knocked_out(obs, 270)
 
 
 # Check whether a given damage amount would Knock Out the opponent's Active Pokemon.
@@ -290,6 +323,7 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
         return STARTER_PRIORITY.get(card_id, 0)
 
     if obs.select.context in {SelectContext.TO_HAND, SelectContext.LOOK}:
+        # Search effects prefer the core attackers, plus Energy when it unlocks setup.
         in_play = _pokemon_ids_in_play(obs)
         hand = set(_hand_ids(obs))
         if card_id == FIGHTING_ENERGY:
@@ -307,7 +341,16 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
     if obs.select.context == SelectContext.DISCARD:
         return DISCARD_PRIORITY.get(card_id, 200)
 
-    if obs.select.context in {SelectContext.ATTACH_TO, SelectContext.TO_ACTIVE, SelectContext.SWITCH}:
+    if obs.select.context == SelectContext.TO_ACTIVE:
+        # Usually this means replacing a Knocked Out Active Pokemon.
+        return _bench_promotion_score(obs, card_id)
+
+    if obs.select.context == SelectContext.SWITCH:
+        # Switch choices use the same Active preference, while still avoiding Meowth.
+        return _bench_promotion_score(obs, card_id)
+
+    if obs.select.context == SelectContext.ATTACH_TO:
+        # Effects that attach Energy should not overfill a Pokemon past its attack needs.
         target = _card_from_area(obs, option.area, option.index, option.playerIndex)
         if _pokemon_has_max_energy(target):
             return -200
@@ -320,6 +363,7 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
 # use an Ability, Retreat, or End Turn.
 def _score_main_action(obs: Observation, option: Option) -> int:
     if option.type == OptionType.ATTACK:
+        # Prefer Mega Lucario's strongest attack when it finishes the opponent's Active.
         if option.attackId == 1210 and _active_can_be_knocked_out(obs, 270):
             return 1000
         if option.attackId == 1209:
@@ -329,15 +373,20 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         return 800
 
     if option.type == OptionType.EVOLVE:
+        # Bench evolutions are safer, and Hariyama waits until its switch Ability matters.
         target_id = _target_id_for_option(obs, option)
         card_id = _card_id_for_option(obs, option)
+        target_bonus = 250 if option.inPlayArea == AreaType.BENCH else 0
         if card_id == LUCARIO and target_id == RIOLU:
-            return 780
+            return 780 + target_bonus
         if card_id == HARIYAMA and target_id == MAKUHITA:
-            return 650
-        return 600
+            if _hariyama_switch_needed(obs):
+                return 650 + target_bonus
+            return 100 + target_bonus
+        return 600 + target_bonus
 
     if option.type == OptionType.ATTACH:
+        # Manual attachments follow target priority unless that Pokemon is already capped.
         card_id = _card_id_for_option(obs, option)
         target = _card_from_area(obs, option.inPlayArea, option.inPlayIndex, obs.current.yourIndex)
         target_id = None if target is None else target.id
@@ -356,6 +405,7 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         return 500
 
     if option.type == OptionType.PLAY:
+        # Play Basic Pokemon and high-value Trainers; damage boosters jump up before attacks.
         card_id = _card_id_for_option(obs, option)
         if card_id == MEOWTH:
             return 80
