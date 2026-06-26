@@ -405,12 +405,36 @@ def _score_main_action(obs: Observation, option: Option) -> int:
         return 500
 
     if option.type == OptionType.PLAY:
-        # Play Basic Pokemon and high-value Trainers; damage boosters jump up before attacks.
         card_id = _card_id_for_option(obs, option)
+        hand = _hand_ids(obs)
+        
+        # --- RULE 1: MEOWTH RESTRICTION ---
         if card_id == MEOWTH:
-            return 80
+            opponent = _opponent_state(obs)
+            # Check for low hand size OR rough heuristic for "winning game with ability"
+            opp_active_low = opponent and opponent.active and opponent.active[0] and opponent.active[0].hp <= 30
+            if len(hand) <= 3 or opp_active_low:
+                return 850
+            return -1000
+
+        # --- RULES 4 & 5: TRAINER PLAY PRIORITIES ---
+        priority_items = {FIGHTING_GONG, POKE_PAD, ULTRA_BALL}
+        has_priority_item = any(item in hand for item in priority_items)
+        
+        if card_id in priority_items:
+            return 2000
+            
+        draw_supporters = {UNFAIR_STAMP, LILLIE, JUDGE}
+        if card_id in draw_supporters:
+            if not has_priority_item:
+                return 1900
+            else:
+                return PLAY_TRAINER_PRIORITY.get(card_id, 200)
+
+        # Standard play logic for other cards
         if card_id in BASIC_POKEMON:
             return STARTER_PRIORITY.get(card_id, 0)
+            
         if card_id in PLAY_TRAINER_PRIORITY:
             score = PLAY_TRAINER_PRIORITY[card_id]
             if card_id == PREMIUM_POWER_PRO and _has_attack_option(obs):
@@ -425,9 +449,26 @@ def _score_main_action(obs: Observation, option: Option) -> int:
                 if active is not None and active.id == LUCARIO and active.hp <= active.maxHp // 2:
                     score += 500
             return score
+            
         return 250
 
     if option.type == OptionType.RETREAT:
+        your = _your_state(obs)
+        if your is not None and your.active and your.active[0] is not None:
+            active_id = your.active[0].id
+            active_priority = BENCH_PROMOTION_PRIORITY.get(active_id, STARTER_PRIORITY.get(active_id, 0))
+            
+            bench_ids = [p.id for p in your.bench if p is not None]
+            bench_priorities = [BENCH_PROMOTION_PRIORITY.get(bid, STARTER_PRIORITY.get(bid, 0)) for bid in bench_ids]
+            
+            # --- RULE 2: SWAP IF LUCARIO EXISTS ON BENCH ---
+            if LUCARIO in bench_ids and active_id != LUCARIO:
+                return 1500
+                
+            # --- RULE 3: SWAP IF BENCH HAS HIGHER PRIORITY ---
+            if bench_priorities and max(bench_priorities) > active_priority:
+                return 1400
+                
         return 120
 
     if option.type == OptionType.END:
