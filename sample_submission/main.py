@@ -409,7 +409,8 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
                 return POKEMON_SEARCH_PRIORITY[card_id]
             return max(100, POKEMON_SEARCH_PRIORITY[card_id] - 350)
         if card_id in {LILLIE, JUDGE, BOSSES_ORDERS, BLACK_BELT_TRAINING, WALLYS_COMPASSION}:
-            return 250
+            # Slightly differentiate trainers based on PLAY_TRAINER_PRIORITY
+            return 250 + (PLAY_TRAINER_PRIORITY.get(card_id, 200) - 200) // 10
 
     if obs.select.context == SelectContext.DISCARD:
         initiator_id = None
@@ -418,8 +419,13 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
         elif obs.select.effect is not None:
             initiator_id = obs.select.effect.id
             
-        if initiator_id == ULTRA_BALL and card_id == FIGHTING_ENERGY:
-            return -10000
+        if initiator_id == ULTRA_BALL:
+            if card_id == FIGHTING_ENERGY:
+                return -10000
+            # --- Rule: With ultra ball discard pokemon that are already on board ---
+            all_pokemon = {RIOLU, LUCARIO, LUNATONE, SOLROCK, MAKUHITA, HARIYAMA, MEOWTH}
+            if card_id in all_pokemon and card_id in _pokemon_ids_in_play(obs):
+                return 1500
         return DISCARD_PRIORITY.get(card_id, 200)
 
     if obs.select.context == SelectContext.TO_ACTIVE:
@@ -451,12 +457,18 @@ def _score_card_selection(obs: Observation, option: Option) -> int:
 def _score_main_action(obs: Observation, option: Option) -> int:
     if option.type == OptionType.ATTACK:
         # Prefer Mega Lucario's strongest attack when it finishes the opponent's Active.
-        if option.attackId == 1210 and _active_can_be_knocked_out(obs, 270):
-            return 1000
-        if option.attackId == 1209:
+        # --- Rule: Don’t use mega brave if aura jab kills ---
+        if option.attackId == 1210:  # Mega Brave
+            if _active_can_be_knocked_out(obs, 130):
+                return -10000
+            elif _active_can_be_knocked_out(obs, 270):
+                return 1000
+            else:
+                return 850
+        if option.attackId == 1209:  # Aura Jab
+            if _active_can_be_knocked_out(obs, 130):
+                return 2000  # Highly prefer Aura Jab if it kills
             return 900
-        if option.attackId == 1210:
-            return 850
         return 800
 
     if option.type == OptionType.EVOLVE:
@@ -505,14 +517,36 @@ def _score_main_action(obs: Observation, option: Option) -> int:
             if not (_is_riolu_able_to_be_evolved(obs) and _has_enough_non_energy_discards(obs)):
                 return -10000
 
+        # --- Rule: Always play draw supporters under certain conditions ---
+        has_gong = FIGHTING_GONG in hand
+        has_pokepad = POKE_PAD in hand
+        has_ultraball = ULTRA_BALL in hand
+        has_starter_or_lucario_in_hand = any(cid in BASIC_POKEMON for cid in hand) or (LUCARIO in hand)
+        has_playable_starter_or_lucario = _has_playable_starter_or_lucario(obs)
+        
+        always_play_draw_supporter = (
+            not has_gong and
+            not has_pokepad and
+            not has_ultraball and
+            not has_starter_or_lucario_in_hand and
+            not has_playable_starter_or_lucario and
+            len(hand) < 4
+        )
+
         # --- Rule: Draw supporter restriction ---
         draw_supporters = {UNFAIR_STAMP, LILLIE, JUDGE}
         if card_id in draw_supporters:
+            if always_play_draw_supporter:
+                return 9500
             if _has_playable_starter_or_lucario(obs):
                 return -10000
 
         # --- Rule: Meowth & Starter prioritization ---
         if card_id in BASIC_POKEMON:
+            # --- Rule: Do not play pokemon already on board unless riolu ---
+            if card_id != RIOLU and card_id in _pokemon_ids_in_play(obs):
+                return -10000
+                
             if card_id == MEOWTH:
                 opponent = _opponent_state(obs)
                 opp_active_low = opponent and opponent.active and opponent.active[0] and opponent.active[0].hp <= 30
@@ -531,11 +565,13 @@ def _score_main_action(obs: Observation, option: Option) -> int:
             if card_id == POKE_PAD:
                 return 2200
             if card_id == ULTRA_BALL:
-                return 2300
+                return 2100
             
         if card_id in draw_supporters:
             if not has_priority_item:
-                return 1900
+                # Add a small boost based on their base priority to break ties.
+                # Lillie (300) > Judge (280) > Unfair Stamp (260)
+                return 1900 + (PLAY_TRAINER_PRIORITY.get(card_id, 200) - 200)
             else:
                 return PLAY_TRAINER_PRIORITY.get(card_id, 200)
             
